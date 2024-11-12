@@ -1,128 +1,104 @@
-#######################
-# Import libraries
-import streamlit as st
 import pandas as pd
-import altair as alt
-import plotly.express as px
+import seaborn as sns
+import matplotlib.pyplot as plt
+import streamlit as st
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import sum, year
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error
 
-#######################
-# Page configuration
-st.set_page_config(
-    page_title="Dashboard Template", # Replace this with your Project's Title
-    page_icon="assets/icon.png", # You may replace this with a custom icon or emoji related to your project
-    layout="wide",
-    initial_sidebar_state="expanded")
+# Initialize Spark session
+spark = SparkSession.builder.appName("DashboardDataProcessing").getOrCreate()
 
-alt.themes.enable("dark")
+st.title("Customer Product Sales Analysis Dashboard")
 
-#######################
+# Load Data
+@st.cache
+def load_data():
+    query = """
+    SELECT ID, Year_Birth, Education, Marital_Status, Dt_Customer, Income, Kidhome, Teenhome, 
+           Recency, MntWines, MntFruits, MntMeatProducts, MntFishProducts, MntSweetProducts, 
+           MntGoldProds, NumDealsPurchases, NumWebPurchases, NumCatalogPurchases, 
+           NumStorePurchases, NumWebVisitsMonth
+    FROM cln_mkt_campaign
+    """
+    data_df = spark.sql(query)
+    return data_df.toPandas()
 
-# Initialize page_selection in session state if not already set
-if 'page_selection' not in st.session_state:
-    st.session_state.page_selection = 'about'  # Default page
+# Sales Analysis
+def calculate_product_sales(data_pd):
+    prodsales_df = data_pd[['MntWines', 'MntFruits', 'MntMeatProducts', 'MntFishProducts', 'MntSweetProducts', 'MntGoldProds']].sum()
+    prodsales_pivot = prodsales_df.reset_index().rename(columns={0: "TotalSales", "index": "Product"})
+    return prodsales_pivot
 
-# Function to update page_selection
-def set_page_selection(page):
-    st.session_state.page_selection = page
+def plot_sales_distribution(prodsales_pivot):
+    plt.figure(figsize=(10, 6))
+    sns.barplot(x='Product', y='TotalSales', data=prodsales_pivot, palette='viridis')
+    plt.title('Total Sales per Product')
+    plt.xlabel('Product')
+    plt.ylabel('Total Sales')
+    st.pyplot(plt)
 
-# Sidebar
-with st.sidebar:
-
-    # Sidebar Title (Change this with your project's title)
-    st.title('Dashboard Template')
-
-    # Page Button Navigation
-    st.subheader("Pages")
-
-    if st.button("About", use_container_width=True, on_click=set_page_selection, args=('about',)):
-        st.session_state.page_selection = 'about'
+# Clustering
+def perform_clustering(data_pd):
+    columns_to_encode = ['Year_Birth', 'Marital_Status', 'Education', 'Dt_Customer']
+    label_encoders = {col: LabelEncoder().fit(data_pd[col]) for col in columns_to_encode}
+    for col, encoder in label_encoders.items():
+        data_pd[col] = encoder.transform(data_pd[col])
     
-    if st.button("Dataset", use_container_width=True, on_click=set_page_selection, args=('dataset',)):
-        st.session_state.page_selection = 'dataset'
+    kmeans_df = data_pd[['Year_Birth', 'Marital_Status', 'Education', 'Income', 'MntWines', 'MntFruits', 
+                         'MntMeatProducts', 'MntFishProducts', 'MntSweetProducts', 'MntGoldProds']]
+    scaler = StandardScaler().fit(kmeans_df)
+    scaled_data = scaler.transform(kmeans_df)
+    
+    kmeans = KMeans(n_clusters=3, random_state=42)
+    data_pd['Cluster'] = kmeans.fit_predict(scaled_data)
+    
+    return data_pd[['Cluster'] + list(kmeans_df.columns)], kmeans
 
-    if st.button("EDA", use_container_width=True, on_click=set_page_selection, args=('eda',)):
-        st.session_state.page_selection = "eda"
+# Regression Model
+def train_regression_model(data_pd):
+    X = data_pd.drop(columns=['MntWines', 'MntFruits', 'MntMeatProducts', 'MntFishProducts', 'MntSweetProducts', 'MntGoldProds'])
+    y = data_pd[['MntWines', 'MntFruits', 'MntMeatProducts', 'MntFishProducts', 'MntSweetProducts', 'MntGoldProds']]
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+    model = RandomForestRegressor(random_state=42)
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    return model, y_test, y_pred
 
-    if st.button("Data Cleaning / Pre-processing", use_container_width=True, on_click=set_page_selection, args=('data_cleaning',)):
-        st.session_state.page_selection = "data_cleaning"
+# Accuracy Evaluation
+def calculate_accuracy(y_test, y_pred):
+    target_columns = ['MntWines', 'MntFruits', 'MntMeatProducts', 'MntFishProducts', 'MntSweetProducts', 'MntGoldProds']
+    mae_values = {col: mean_absolute_error(y_test[col], y_pred[:, i]) for i, col in enumerate(target_columns)}
+    return mae_values
 
-    if st.button("Machine Learning", use_container_width=True, on_click=set_page_selection, args=('machine_learning',)): 
-        st.session_state.page_selection = "machine_learning"
+# Main function to run the dashboard functions
+def main():
+    data_pd = load_data()
+    
+    # Display raw data
+    st.subheader("Raw Data")
+    st.write(data_pd.head())
+    
+    # Sales Distribution
+    st.subheader("Total Sales per Product")
+    prodsales_pivot = calculate_product_sales(data_pd)
+    plot_sales_distribution(prodsales_pivot)
+    
+    # Clustering
+    st.subheader("Customer Clustering")
+    clustered_data, kmeans = perform_clustering(data_pd)
+    st.write("Clustered Data Summary:", clustered_data.groupby('Cluster').mean())
+    
+    # Regression Model and Accuracy
+    st.subheader("Regression Model Accuracy")
+    model, y_test, y_pred = train_regression_model(data_pd)
+    accuracy = calculate_accuracy(y_test, y_pred)
+    st.write("Model Accuracy (Mean Absolute Error):", accuracy)
 
-    if st.button("Prediction", use_container_width=True, on_click=set_page_selection, args=('prediction',)): 
-        st.session_state.page_selection = "prediction"
-
-    if st.button("Conclusion", use_container_width=True, on_click=set_page_selection, args=('conclusion',)):
-        st.session_state.page_selection = "conclusion"
-
-    # Project Members
-    st.subheader("Members")
-    st.markdown("1. Elon Musk\n2. Jeff Bezos\n3. Sam Altman\n4. Mark Zuckerberg")
-
-#######################
-# Data
-
-# Load data
-dataset = pd.read_csv("data/IRIS.csv")
-
-#######################
-
-# Pages
-
-# About Page
-if st.session_state.page_selection == "about":
-    st.header("ℹ️ About")
-
-    # Your content for the ABOUT page goes here
-
-# Dataset Page
-elif st.session_state.page_selection == "dataset":
-    st.header("📊 Dataset")
-
-    st.write("IRIS Flower Dataset")
-    st.write("")
-
-    # Your content for your DATASET page goes here
-
-# EDA Page
-elif st.session_state.page_selection == "eda":
-    st.header("📈 Exploratory Data Analysis (EDA)")
-
-
-    col = st.columns((1.5, 4.5, 2), gap='medium')
-
-    # Your content for the EDA page goes here
-
-    with col[0]:
-        st.markdown('#### Graphs Column 1')
-
-
-    with col[1]:
-        st.markdown('#### Graphs Column 2')
-        
-    with col[2]:
-        st.markdown('#### Graphs Column 3')
-
-# Data Cleaning Page
-elif st.session_state.page_selection == "data_cleaning":
-    st.header("🧼 Data Cleaning and Data Pre-processing")
-
-    # Your content for the DATA CLEANING / PREPROCESSING page goes here
-
-# Machine Learning Page
-elif st.session_state.page_selection == "machine_learning":
-    st.header("🤖 Machine Learning")
-
-    # Your content for the MACHINE LEARNING page goes here
-
-# Prediction Page
-elif st.session_state.page_selection == "prediction":
-    st.header("👀 Prediction")
-
-    # Your content for the PREDICTION page goes here
-
-# Conclusions Page
-elif st.session_state.page_selection == "conclusion":
-    st.header("📝 Conclusion")
-
-    # Your content for the CONCLUSION page goes here
+if __name__ == "__main__":
+    main()
